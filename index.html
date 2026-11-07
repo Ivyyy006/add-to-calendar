@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Add Your Appointment to Your Calendar</title>
+<style>
+  :root{
+    --ivory:#F8F6F0; --forest:#244536; --gold:#C3A263; --charcoal:#303849;
+    --sage:#A7BBAB; --smoky:#4D665E; --navy:#182D3C;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ivory);color:var(--charcoal);
+    font-family:Georgia,'Times New Roman',serif;padding:28px 16px 40px;}
+  .card{max-width:520px;margin:0 auto;background:#FFFDF9;border:2px solid var(--gold);
+    border-radius:18px;padding:28px 24px 24px;text-align:center;
+    box-shadow:0 6px 24px rgba(36,69,54,.10);}
+  h1{font-size:24px;color:var(--forest);margin:0 0 6px;font-weight:600;}
+  .sub{font-size:15px;color:var(--smoky);margin:0 0 18px;font-style:italic;}
+  .appt{font-size:19px;color:var(--forest);line-height:1.45;margin:0 0 4px;font-weight:600;}
+  .appt-tz{font-size:13px;color:var(--smoky);margin:0 0 22px;}
+  .btn{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;
+    min-height:52px;margin:0 0 12px;padding:10px 16px;border-radius:99px;
+    border:2px solid #8F9A88;background:linear-gradient(#FFFDF9,#EDE3D1);
+    color:var(--forest);font-family:Georgia,serif;font-size:16px;font-weight:600;
+    text-decoration:none;cursor:pointer;}
+  .btn:active{transform:translateY(1px)}
+  .btn .dot{font-size:18px;line-height:1}
+  .note{font-size:13px;color:var(--smoky);line-height:1.5;margin:14px 0 0;}
+  .error{background:#FDF3F0;border:1px solid #D9A08F;border-radius:12px;
+    padding:14px;font-size:14px;line-height:1.5;color:#7A3B2E;margin:0 0 16px;}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Add to Calendar</h1>
+    <p class="sub">Save your appointment so you don't miss it.</p>
+
+    <div id="errBox" class="error hidden"></div>
+
+    <p id="apptLine" class="appt"></p>
+    <p id="apptTz" class="appt-tz"></p>
+
+    <a id="btnGoogle" class="btn" href="#" target="_blank" rel="noopener"><span class="dot">📅</span> Google Calendar</a>
+    <a id="btnOutlook" class="btn" href="#" target="_blank" rel="noopener"><span class="dot">📅</span> Outlook Calendar</a>
+    <a id="btnApple" class="btn" href="#"><span class="dot">📅</span> Apple Calendar</a>
+
+    <p class="note">Apple Calendar downloads a small calendar file — tap it and choose “Add” to save your appointment.</p>
+  </div>
+
+<script>
+/*CORE-START*/
+/* ---------- parsing helpers (pure, testable) ---------- */
+var APPT_TZ = 'America/New_York';
+var EVENT_TITLE = 'Your Appointment with Ivana';
+var EVENT_BODY  = 'Your health insurance appointment with Ivana Dipp.';
+
+var MONTHS = {january:0,february:1,march:2,april:3,may:4,june:5,july:6,
+  august:7,september:8,october:9,november:10,december:11,
+  jan:0,feb:1,mar:2,apr:3,jun:5,jul:6,aug:7,sep:8,sept:8,oct:9,nov:10,dec:11};
+
+function pad(n){ return (n<10?'0':'')+n; }
+
+/* Wall-clock time in APPT_TZ -> UTC Date, using Intl for the zone offset. */
+function wallToUTC(y, mo, d, h, mi){
+  var guess = Date.UTC(y, mo, d, h, mi, 0);
+  for (var i=0;i<3;i++){
+    var parts = new Intl.DateTimeFormat('en-US',{timeZone:APPT_TZ,
+      year:'numeric',month:'numeric',day:'numeric',
+      hour:'numeric',minute:'numeric',second:'numeric',hour12:false}).formatToParts(new Date(guess));
+    var p = {};
+    for (var j=0;j<parts.length;j++){ p[parts[j].type] = parseInt(parts[j].value,10); }
+    var asUTC = Date.UTC(p.year, p.month-1, p.day, p.hour % 24, p.minute, p.second||0);
+    var want  = Date.UTC(y, mo, d, h, mi, 0);
+    var diff  = want - asUTC;
+    if (diff === 0) break;
+    guess += diff;
+  }
+  return new Date(guess);
+}
+
+function parseTimeToken(s){
+  /* "5:00 PM" | "5 PM" | "17:00" -> {h, mi} 24h, or null */
+  var m = /(\d{1,2})(?::(\d{2}))?\s*([AaPp])\.?[Mm]\.?/.exec(s);
+  if (m){
+    var h = parseInt(m[1],10) % 12;
+    if (/[Pp]/.test(m[3])) h += 12;
+    return { h:h, mi: m[2] ? parseInt(m[2],10) : 0 };
+  }
+  m = /\b([01]?\d|2[0-3]):([0-5]\d)\b/.exec(s);
+  if (m) return { h: parseInt(m[1],10), mi: parseInt(m[2],10) };
+  return null;
+}
+
+/* Parse the many shapes a form {appointment} tag can print.
+   Returns {start:Date(UTC), end:Date(UTC)} or null. */
+function parseAppointmentText(raw){
+  if (!raw) return null;
+  var s = String(raw).replace(/\s+/g,' ').trim();
+
+  /* ISO / basic forms first: 2026-11-09T17:00, 20261109T220000Z ... */
+  var iso = /(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/.exec(s);
+  if (iso){
+    var st = new Date(Date.UTC(+iso[1], +iso[2]-1, +iso[3], +iso[4], +iso[5]));
+    return { start: st, end: new Date(st.getTime() + 60*60000) };
+  }
+  var basic = /(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/.exec(s);
+  if (basic){
+    var bs = new Date(Date.UTC(+basic[1], +basic[2]-1, +basic[3], +basic[4], +basic[5], +basic[6]));
+    return { start: bs, end: new Date(bs.getTime() + 60*60000) };
+  }
+
+  /* Date: "November 9, 2026" | "Nov 9 2026" | "11/09/2026" | "2026-11-09" */
+  var y, mo, d;
+  var mName = /([A-Za-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})/.exec(s);
+  var mNum  = /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/.exec(s);
+  var mYMD  = /\b(\d{4})-(\d{2})-(\d{2})\b/.exec(s);
+  if (mName && MONTHS[mName[1].toLowerCase()] !== undefined){
+    mo = MONTHS[mName[1].toLowerCase()]; d = +mName[2]; y = +mName[3];
+  } else if (mNum){
+    mo = +mNum[1]-1; d = +mNum[2]; y = +mNum[3];
+  } else if (mYMD){
+    y = +mYMD[1]; mo = +mYMD[2]-1; d = +mYMD[3];
+  } else { return null; }
+
+  /* Times: split on a range dash if present ("5:00 PM - 6:00 PM") */
+  var times = [];
+  var rangeParts = s.split(/\s+[-–—]\s+|\s+to\s+/i);
+  for (var k=0;k<rangeParts.length;k++){
+    var t = parseTimeToken(rangeParts[k]);
+    if (t) times.push(t);
+  }
+  if (!times.length){
+    var single = parseTimeToken(s);
+    if (single) times.push(single);
+  }
+  if (!times.length) return null;
+
+  var start = wallToUTC(y, mo, d, times[0].h, times[0].mi);
+  var end;
+  if (times.length > 1){
+    end = wallToUTC(y, mo, d, times[1].h, times[1].mi);
+    if (end <= start) end = new Date(start.getTime() + 60*60000);
+  } else {
+    end = new Date(start.getTime() + 60*60000);
+  }
+  return { start:start, end:end };
+}
+
+function fmtBasicUTC(dt){ /* 20261109T220000Z */
+  return dt.getUTCFullYear() + pad(dt.getUTCMonth()+1) + pad(dt.getUTCDate()) + 'T' +
+         pad(dt.getUTCHours()) + pad(dt.getUTCMinutes()) + pad(dt.getUTCSeconds()) + 'Z';
+}
+function fmtISOZ(dt){ /* 2026-11-09T22:00:00Z */
+  return dt.getUTCFullYear() + '-' + pad(dt.getUTCMonth()+1) + '-' + pad(dt.getUTCDate()) + 'T' +
+         pad(dt.getUTCHours()) + ':' + pad(dt.getUTCMinutes()) + ':' + pad(dt.getUTCSeconds()) + 'Z';
+}
+
+function googleURL(start, end){
+  return 'https://calendar.google.com/calendar/render?action=TEMPLATE' +
+    '&text=' + encodeURIComponent(EVENT_TITLE) +
+    '&dates=' + fmtBasicUTC(start) + '/' + fmtBasicUTC(end) +
+    '&details=' + encodeURIComponent(EVENT_BODY) +
+    '&ctz=' + encodeURIComponent(APPT_TZ);
+}
+function outlookURL(start, end){
+  return 'https://outlook.live.com/calendar/0/deeplink/compose?path=/calendar/action/compose&rru=addevent' +
+    '&startdt=' + encodeURIComponent(fmtISOZ(start)) +
+    '&enddt='   + encodeURIComponent(fmtISOZ(end)) +
+    '&subject=' + encodeURIComponent(EVENT_TITLE) +
+    '&body='    + encodeURIComponent(EVENT_BODY);
+}
+function icsText(start, end, uid){
+  function esc(v){ return String(v).replace(/\\/g,'\\\\').replace(/;/g,'\\;').replace(/,/g,'\\,').replace(/\n/g,'\\n'); }
+  return ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Ivana Dipp//AddToCalendar//EN',
+    'BEGIN:VEVENT','UID:' + uid,'DTSTAMP:' + fmtBasicUTC(new Date()),
+    'DTSTART:' + fmtBasicUTC(start),'DTEND:' + fmtBasicUTC(end),
+    'SUMMARY:' + esc(EVENT_TITLE),'DESCRIPTION:' + esc(EVENT_BODY),
+    'END:VEVENT','END:VCALENDAR'].join('\r\n');
+}
+/*CORE-END*/
+
+/* ---------- page wiring ---------- */
+(function(){
+  var q = new URLSearchParams(window.location.search);
+  var range = null;
+
+  if (q.get('start') && q.get('end')){
+    var ps = parseAppointmentText(q.get('start'));
+    var pe = parseAppointmentText(q.get('end'));
+    if (ps && pe) range = { start: ps.start, end: pe.start };
+  }
+  if (!range) range = parseAppointmentText(q.get('appt') || q.get('appointment') || '');
+
+  var errBox  = document.getElementById('errBox');
+  var apptEl  = document.getElementById('apptLine');
+  var tzEl    = document.getElementById('apptTz');
+  var bG = document.getElementById('btnGoogle');
+  var bO = document.getElementById('btnOutlook');
+  var bA = document.getElementById('btnApple');
+
+  if (!range){
+    errBox.textContent = 'We could not read your appointment time from this link. ' +
+      'Please check the confirmation on your thank-you page, or contact us and we will gladly add it for you.';
+    errBox.classList.remove('hidden');
+    bG.classList.add('hidden'); bO.classList.add('hidden'); bA.classList.add('hidden');
+    apptEl.textContent = ''; tzEl.textContent = '';
+    return;
+  }
+
+  var friendly = new Intl.DateTimeFormat('en-US',{timeZone:APPT_TZ,
+    weekday:'long', month:'long', day:'numeric', year:'numeric'}).format(range.start);
+  var tFmt = new Intl.DateTimeFormat('en-US',{timeZone:APPT_TZ, hour:'numeric', minute:'2-digit'});
+  apptEl.textContent = friendly + ' · ' + tFmt.format(range.start) + ' – ' + tFmt.format(range.end);
+  tzEl.textContent = 'Eastern Time';
+
+  bG.href = googleURL(range.start, range.end);
+  bO.href = outlookURL(range.start, range.end);
+  bA.addEventListener('click', function(ev){
+    ev.preventDefault();
+    var text = icsText(range.start, range.end,
+      'appt-' + fmtBasicUTC(range.start) + '@ivyyy006.github.io');
+    var blob = new Blob([text], {type:'text/calendar;charset=utf-8'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = 'appointment.ics';
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ URL.revokeObjectURL(url); a.remove(); }, 1500);
+  });
+})();
+</script>
+</body>
+</html>
